@@ -398,8 +398,19 @@ def _cwd_marker(session_id: str) -> str:
 #
 # Kept in sync with gateway.session_context._VAR_MAP: every bridged name starts
 # with one of these prefixes.
+# Extended locally: credential-related env vars are excluded so they never
+# persist in terminal snapshot cache files on disk.
 _SNAPSHOT_EXCLUDED_ENV_REGEX = (
-    "^declare -x (HERMES_SESSION_|HERMES_UI_SESSION_ID|HERMES_CRON_AUTO_DELIVER_)"
+    "^declare -x ("
+    "HERMES_SESSION_|HERMES_UI_SESSION_ID|HERMES_CRON_AUTO_DELIVER_|"
+    "BWS_|BW_SESSION|"
+    "CAPSOLVER_|HUNTER_|"
+    "HERMES_MAIL|AMP_OUTLOOK|HERMES_EMAIL|"
+    "DEEPSEEK_|OPENAI_|OPENCODE_API|HUGGINGFACE_|GITHUB_|"
+    "COINBASE_|BINANCE_|GODADDY_|SISAL_|XAMIG_|DEGIRO_|"
+    "DEVIANTART_|GUMROAD_|KOFI_|PAYHIP_|INSTAGRAM_|REDDIT_|"
+    "TUTA_|BUTTONDOWN_|CAMOFOX_|COINPAYMENTS_"
+    ")"
 )
 
 

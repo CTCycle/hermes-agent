@@ -2436,6 +2436,8 @@ def delegate_task(
     max_iterations: Optional[int] = None,
     role: Optional[str] = None,
     background: Optional[bool] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -2604,6 +2606,27 @@ def delegate_task(
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
+
+            # Resolve per-task model and provider overrides.
+            # Priority: per-task > top-level call arg > config > parent inherit
+            task_model = t.get("model") or model or creds["model"]
+            task_provider = t.get("provider") or provider or creds["provider"]
+
+            # When provider differs from the config-resolved creds, re-resolve
+            # credentials for that specific provider+model pair.
+            task_creds = creds
+            if task_provider and task_provider != creds.get("provider"):
+                # Build a temporary config override for provider resolution
+                override_cfg = dict(cfg)
+                override_cfg["provider"] = task_provider
+                override_cfg["model"] = task_model
+                try:
+                    task_creds = _resolve_delegation_credentials(override_cfg, parent_agent)
+                except ValueError:
+                    # Fall back to config creds with just the model override
+                    task_creds = dict(creds)
+                    task_creds["model"] = task_model
+
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
@@ -2611,18 +2634,18 @@ def delegate_task(
                 # Subagents always inherit the parent's toolsets; the model
                 # cannot choose or narrow them (no model-facing toolsets arg).
                 toolsets=None,
-                model=creds["model"],
+                model=task_model or task_creds["model"],
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
                 parent_agent=parent_agent,
-                override_provider=creds["provider"],
-                override_base_url=creds["base_url"],
-                override_api_key=creds["api_key"],
-                override_api_mode=creds["api_mode"],
-                override_request_overrides=creds.get("request_overrides"),
-                override_max_tokens=creds.get("max_output_tokens"),
-                override_acp_command=creds.get("command"),
-                override_acp_args=creds.get("args"),
+                override_provider=task_creds["provider"],
+                override_base_url=task_creds["base_url"],
+                override_api_key=task_creds["api_key"],
+                override_api_mode=task_creds["api_mode"],
+                override_request_overrides=task_creds.get("request_overrides"),
+                override_max_tokens=task_creds.get("max_output_tokens"),
+                override_acp_command=task_creds.get("command"),
+                override_acp_args=task_creds.get("args"),
                 role=effective_role,
             )
             # Override with correct parent tool names (before child construction mutated global)
@@ -3039,6 +3062,13 @@ def delegate_task(
                     pass
 
         _goals = [t["goal"] for t in task_list]
+        # Compute display model from children (may differ per-task).
+        # Use the first child's model for the batch-level metadata display;
+        # individual per-task models are set independently in _build_child_agent.
+        _batch_display_model = creds["model"]
+        if children:
+            _first = children[0][2]  # child agent at index 2
+            _batch_display_model = getattr(_first, "model", None) or _batch_display_model
         dispatch = dispatch_async_delegation_batch(
             goals=_goals,
             context=context,
@@ -3046,7 +3076,7 @@ def delegate_task(
             # parent's toolsets (no model-facing toolsets arg).
             toolsets=None,
             role=top_role,
-            model=creds["model"],
+            model=_batch_display_model,
             session_key=_session_key,
             origin_ui_session_id=_origin_ui_session_id,
             origin_session_id=_wake_sid,
@@ -3475,7 +3505,7 @@ def _build_top_level_description() -> str:
         f"Orchestrators are bounded by max_spawn_depth={max_depth} for this "
         f"user and can be disabled globally via "
         "delegation.orchestrator_enabled=false.\n"
-        "- Subagent model is NOT selectable per call: children inherit the parent model (plus its fallback chain) unless you pin all subagents to a model via delegation.provider / delegation.model in config.yaml.\n"
+        "- Subagent model IS selectable per call: pass 'model' (and optionally 'provider') as a parameter to override the config-level delegation.model/delegation.provider for that subagent. If omitted the child inherits from config/parent.\n"
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
         "- Results are always returned as an array, one entry per task."
     )
@@ -3604,6 +3634,14 @@ DELEGATE_TASK_SCHEMA = {
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
                         },
+                        "model": {
+                            "type": "string",
+                            "description": "Per-task model override. Overrides the top-level 'model' for this task. Uses the parent's provider unless 'provider' is also set.",
+                        },
+                        "provider": {
+                            "type": "string",
+                            "description": "Per-task provider override. Overrides the top-level 'provider' for this task.",
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -3628,6 +3666,14 @@ DELEGATE_TASK_SCHEMA = {
                     "Setting this has no effect; the parameter remains only for "
                     "backward compatibility."
                 ),
+            },
+            "model": {
+                "type": "string",
+                "description": "Model override for the subagent (e.g. 'deepseek-v4-pro', 'qwen3.7-plus'). When set, the subagent uses this model instead of the config-level delegation.model. The provider is inherited from the parent or delegation.provider config unless 'provider' is also set.",
+            },
+            "provider": {
+                "type": "string",
+                "description": "Provider override for the subagent (e.g. 'opencode-go', 'deepseek'). When set alongside 'model', the subagent routes to that provider with the specified model. When set without 'model', uses the provider's default model.",
             },
         },
         "required": [],
@@ -3688,6 +3734,8 @@ registry.register(
         tasks=_strip_model_hidden_task_fields(args.get("tasks")),
         max_iterations=args.get("max_iterations"),
         role=args.get("role"),
+        model=args.get("model"),
+        provider=args.get("provider"),
         background=_model_background_value(args, kw.get("parent_agent")),
         parent_agent=kw.get("parent_agent"),
     ),
